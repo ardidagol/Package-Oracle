@@ -1,0 +1,1369 @@
+/* Formatted on 4/1/2019 10:22:06 AM (QP5 v5.256.13226.35538) */
+CREATE OR REPLACE PACKAGE BODY APPS.xxshp_mpn_halal_exp_notify
+AS
+   PROCEDURE logf (p_msg VARCHAR2)
+   IS
+   BEGIN
+      fnd_file.put_line (fnd_file.LOG, p_msg);
+      DBMS_OUTPUT.put_line (p_msg);
+   END logf;
+
+   PROCEDURE outf (p_msg VARCHAR2)
+   IS
+   BEGIN
+      fnd_file.put_line (fnd_file.output, p_msg);
+      DBMS_OUTPUT.put_line (p_msg);
+   END outf;
+
+   PROCEDURE print_result
+   IS
+      l_user_name   VARCHAR (50);
+
+      CURSOR c_data (
+         p_inventory_item_id    NUMBER)
+      IS
+           SELECT organization_code,
+                  item_description,
+                  msi.segment1 item_code,
+                  SUM (transaction_quantity) quantity,
+                  msi.attribute2
+             FROM mtl_onhand_quantities_detail moq,
+                  mtl_system_items msi,
+                  mtl_mfg_part_numbers_all_v mpn,
+                  mtl_parameters mp
+            WHERE     1 = 1
+                  AND moq.inventory_item_id = msi.inventory_item_id
+                  AND mpn.inventory_item_id = msi.inventory_item_id
+                  AND mp.organization_id = moq.organization_id
+                  AND moq.inventory_item_id = p_inventory_item_id
+                  AND TRIM (msi.attribute2) IN ('PM', 'FGSA BUY', 'FGSA MAKE')
+         GROUP BY organization_code,
+                  item_description,
+                  msi.segment1,
+                  msi.attribute2;
+   BEGIN
+      SELECT user_name
+        INTO l_user_name
+        FROM fnd_user
+       WHERE user_id = g_user_id;
+
+      outf ('/* START */');
+      outf (' ');
+      outf (' ');
+      outf (' ');
+      outf ('      ' || 'Change status Phase Out report');
+      outf (' ');
+      outf ('      ' || 'Proceed By      : ' || l_user_name);
+      outf ('      ' || 'Proceed Date on : ' || SYSDATE);
+
+      FOR i IN chg_stts_cur
+      LOOP
+         outF (
+               '      '
+            || '---- ---------------- --------------------------------------------------- ------ ------------------------------------------------------------------------------------------------------------------------');
+         outF (
+               '      '
+            || 'ORG  ITEM CODE        ITEM DESCRIPTION                                    STATUS ERROR MESSAGE                                                                                                           ');
+         outF (
+               '      '
+            || '---- ---------------- --------------------------------------------------- ------ ------------------------------------------------------------------------------------------------------------------------');
+
+         FOR j IN c_data (i.inventory_item_id)
+         LOOP
+            outF (
+                  '      '
+               || RPAD (j.organization_code, 3, ' ')
+               || '  '
+               || RPAD (j.item_code, 15, ' ')
+               || '  '
+               || RPAD (j.item_description, 50, ' ')
+               || '  '
+               || RPAD ('.', 5, ' ')
+               || '  '
+               || RPAD ('.', 200, ' '));
+         END LOOP;
+      END LOOP;
+
+      outF (
+            '      '
+         || '---- ---------------- --------------------------------------------------- ------ ------------------------------------------------------------------------------------------------------------------------');
+      outf (' ');
+      outf (' ');
+      outf (' ');
+      outf ('/* END */');
+   END print_result;
+
+   PROCEDURE change_status_exp (v_inventory_item_id    NUMBER,
+                                v_organization_id      NUMBER)
+   IS
+      l_item_table      ego_item_pub.item_tbl_type;
+      x_item_table      ego_item_pub.item_tbl_type;
+      x_return_status   VARCHAR2 (1);
+      x_msg_count       NUMBER (10);
+      x_message_list    error_handler.error_tbl_type;
+      error_bro         EXCEPTION;
+
+      l_err             NUMBER := 0;
+   BEGIN
+      --Apps Initialize
+      fnd_global.apps_initialize (user_id        => g_user_id,
+                                  resp_id        => g_resp_id,
+                                  resp_appl_id   => g_resp_appl_id);
+
+      ------------------------------------------------------------------
+
+
+      -- Item definition
+      l_item_table (1).transaction_type := 'UPDATE';
+      l_item_table (1).inventory_item_id := v_inventory_item_id;
+      l_item_table (1).organization_id := v_organization_id;
+      --      l_item_table (1).check_shortages_flag := 'N';
+      --      l_item_table (1).mtl_transactions_enabled_flag := 'N';
+      l_item_table (1).inventory_item_status_code := 'Phase Out';
+
+      -- Calling procedure EGO_ITEM_PUB.Process_Items
+      ego_item_pub.process_items (                          --Input Parameters
+                                  p_api_version     => 1.0,
+                                  p_init_msg_list   => fnd_api.g_true,
+                                  p_commit          => fnd_api.g_true,
+                                  p_item_tbl        => l_item_table,
+                                  --Output Parameters
+                                  x_item_tbl        => x_item_table,
+                                  x_return_status   => x_return_status,
+                                  x_msg_count       => x_msg_count);
+
+      logf ('Items updated Status ==>' || x_return_status);
+
+      IF (x_return_status = fnd_api.g_ret_sts_success)
+      THEN
+         FOR i IN 1 .. x_item_table.COUNT
+         LOOP
+            logf (
+                  'Inventory Item Id :'
+               || TO_CHAR (x_item_table (i).inventory_item_id));
+            logf (
+                  'Organization Id   :'
+               || TO_CHAR (x_item_table (i).organization_id));
+         END LOOP;
+      ELSE
+         logf ('Error Messages :');
+         error_handler.get_message_list (x_message_list => x_message_list);
+
+         FOR i IN 1 .. x_message_list.COUNT
+         LOOP
+            logf (x_message_list (i).MESSAGE_TEXT);
+         END LOOP;
+
+         IF x_return_status = 'E'
+         THEN
+            NULL;
+         --RAISE error_bro;
+         END IF;
+      END IF;
+   END;
+
+   PROCEDURE process_recipients (p_mail_conn   IN OUT UTL_SMTP.connection,
+                                 p_list        IN     VARCHAR2)
+   AS
+      l_tab   string_api.t_split_array;
+   BEGIN
+      IF TRIM (p_list) IS NOT NULL
+      THEN
+         l_tab := string_api.split_text (p_list);
+
+         FOR i IN 1 .. l_tab.COUNT
+         LOOP
+            UTL_SMTP.rcpt (p_mail_conn, TRIM (l_tab (i)));
+         END LOOP;
+      END IF;
+   END process_recipients;
+
+   PROCEDURE cek_onhand (p_item_id IN NUMBER)
+   IS
+      v_qty         NUMBER;
+      v_item_code   mtl_system_items.segment1%TYPE;
+      error_bro     EXCEPTION;
+   BEGIN
+        SELECT SUM (transaction_quantity) quantity, msi.segment1
+          --subinventory_code,
+          --locator_id,
+          --lpn_id,
+          --moq.inventory_item_id,
+          INTO v_qty, v_item_code
+          FROM mtl_onhand_quantities_detail moq,
+               mtl_system_items msi,
+               mtl_mfg_part_numbers_all_v mpn
+         WHERE     1 = 1
+               AND moq.inventory_item_id = msi.inventory_item_id
+               AND mpn.inventory_item_id = msi.inventory_item_id
+               AND moq.inventory_item_id = p_item_id
+               AND TRIM (msi.attribute2) IN ('PM', 'FGSA BUY', 'FGSA MAKE')
+      GROUP BY msi.segment1;
+
+      IF v_qty <> 0
+      THEN
+         logf ('Item Code ' || v_item_code || ' still have items On-hand!');
+         RAISE error_bro;
+      END IF;
+   END cek_onhand;
+
+   PROCEDURE check_mpn_halal_exp (errbuf OUT VARCHAR2, retcode OUT NUMBER)
+   IS
+      v_cnt_ed      NUMBER := 0;
+      v_cnt_3m      NUMBER := 0;
+      v_result_ed   VARCHAR2 (250);
+      v_result_3m   VARCHAR2 (250);
+
+      v_qty         NUMBER;
+      v_pll         NUMBER;
+      v_mo          NUMBER;
+      v_item_code   mtl_system_items.segment1%TYPE;
+      l_err         NUMBER := 0;
+   BEGIN
+      logf ('Status data M-3 - insert ke dalam temp');
+
+      FOR rec3m IN mpn_3m_cur
+      LOOP
+         INSERT INTO xxshp_mpn_halal_exp_temp (data_id,
+                                               kn,
+                                               item_code,
+                                               item_desc,
+                                               uom,
+                                               organization_code,
+                                               supplier_name,
+                                               part,
+                                               sertf_halal_number,
+                                               halal_expiry_date,
+                                               first_notification_date,
+                                               phase_out,
+                                               creation_date,
+                                               last_update_date,
+                                               type_email,
+                                               item_template,
+                                               halal_body,
+                                               manufacturer_name,
+                                               mfg_part_num)
+              VALUES (xxshp_mpn_halal_exp_temp_s.NEXTVAL,
+                      rec3m.kn_lob,
+                      rec3m.item_code,
+                      rec3m.item_desc,
+                      rec3m.uom_code,
+                      rec3m.organization_code,
+                      rec3m.supplier_name,
+                      rec3m.part,
+                      rec3m.halal_number,
+                      rec3m.halal_valid_to,
+                      SYSDATE,
+                      rec3m.halal_valid_to, --add_months(add_months(sysdate,4),-3),
+                      SYSDATE,
+                      SYSDATE,
+                      'M-3',
+                      rec3m.item_template,
+                      rec3m.halal_body,
+                      rec3m.manufacturer_name,
+                      rec3m.mfg_part_num);
+
+         v_cnt_3m := v_cnt_3m + 1;
+      END LOOP;
+
+      logf ('Status data Phase Out - insert ke dalam temp');
+
+      FOR recEd IN mpn_ed_cur
+      LOOP
+         INSERT INTO xxshp_mpn_halal_exp_temp (data_id,
+                                               kn,
+                                               item_code,
+                                               item_desc,
+                                               uom,
+                                               organization_code,
+                                               supplier_name,
+                                               part,
+                                               sertf_halal_number,
+                                               halal_expiry_date,
+                                               first_notification_date,
+                                               phase_out,
+                                               creation_date,
+                                               last_update_date,
+                                               type_email,
+                                               item_template,
+                                               halal_body,
+                                               manufacturer_name,
+                                               mfg_part_num)
+                 VALUES (
+                           xxshp_mpn_halal_exp_temp_s.NEXTVAL,
+                           recEd.kn_lob,
+                           recEd.item_code,
+                           recEd.item_desc,
+                           recEd.uom_code,
+                           recEd.organization_code,
+                           recEd.supplier_name,
+                           recEd.part,
+                           recEd.halal_number,
+                           recEd.halal_valid_to,
+                           (CASE
+                               WHEN recEd.first_notification_date IS NOT NULL
+                               THEN
+                                  recEd.first_notification_date
+                            END),
+                           SYSDATE,
+                           SYSDATE,
+                           SYSDATE,
+                           'Phase Out',
+                           recEd.item_template,
+                           recEd.halal_body,
+                           recEd.manufacturer_name,
+                           recEd.mfg_part_num);
+
+         v_cnt_ed := v_cnt_ed + 1;
+      END LOOP;
+
+      logf ('Total 3M : ' || v_cnt_3m);
+      logf ('Total Phase Out : ' || v_cnt_ed);
+      COMMIT;
+
+      IF v_cnt_ed > 0
+      THEN
+         logf ('Update status menjadi Phase Out');
+
+         FOR i IN chg_stts_cur
+         LOOP
+            --cek onhand
+            BEGIN
+                 SELECT SUM (transaction_quantity) quantity, msi.segment1
+                   INTO v_qty, v_item_code
+                   FROM mtl_onhand_quantities_detail moq,
+                        mtl_system_items msi,
+                        mtl_mfg_part_numbers_all_v mpn
+                  WHERE     1 = 1
+                        AND moq.inventory_item_id = msi.inventory_item_id
+                        AND mpn.inventory_item_id = msi.inventory_item_id
+                        AND moq.inventory_item_id = i.inventory_item_id
+                        AND TRIM (msi.attribute2) IN ('PM',
+                                                      'FGSA BUY',
+                                                      'FGSA MAKE')
+               GROUP BY msi.segment1;
+            EXCEPTION
+               WHEN NO_DATA_FOUND
+               THEN
+                  v_qty := 0;
+            END;
+
+            IF v_qty > 0
+            THEN
+               logf (
+                  'Item Code ' || v_item_code || ' still have items On-hand!');
+               --RAISE error_bro;
+               l_err := l_err + 1;
+            END IF;
+
+            -- cek po
+            BEGIN
+               SELECT COUNT (pll.closed_code)
+                 INTO v_pll
+                 FROM po_lines_all pla, po_line_locations_all pll
+                WHERE     pla.po_line_id = pll.po_line_id
+                      AND pla.item_id = i.inventory_item_id
+                      AND pll.closed_code = 'OPEN';
+            EXCEPTION
+               WHEN NO_DATA_FOUND
+               THEN
+                  v_pll := 0;
+            END;
+
+            IF v_pll > 0
+            THEN
+               logf (
+                  'Item Code ' || v_item_code || ' still have items Open PO!');
+               --RAISE error_bro;
+               l_err := l_err + 1;
+            END IF;
+
+            --cek MO
+            BEGIN
+               SELECT COUNT (*)
+                 INTO v_mo
+                 FROM mtl_txn_request_lines mtrl,
+                      mtl_txn_request_headers mtrh,
+                      fnd_user fu
+                WHERE     1 = 1
+                      AND mtrl.inventory_item_id = 38092
+                      --  AND mtrl.organization_id = &OrganizationID
+                      AND mtrl.line_status IN (5, 7)    --- Preapproved status
+                      AND mtrl.header_id = mtrh.header_id
+                      AND mtrl.created_by = fu.user_id;
+            EXCEPTION
+               WHEN NO_DATA_FOUND
+               THEN
+                  v_mo := 0;
+            END;
+
+            IF v_mo > 0
+            THEN
+               logf (
+                  'Item Code ' || v_item_code || ' still have items Open PO!');
+               --RAISE error_bro;
+               l_err := l_err + 1;
+            END IF;
+
+            change_status_exp (v_inventory_item_id   => i.inventory_item_id,
+                               v_organization_id     => i.organization_id);
+         END LOOP;
+
+         IF l_err > 0
+         THEN
+            print_result;
+
+            IF v_qty > 0
+            THEN
+               send_mail_onhand;
+            END IF;
+
+            IF v_pll > 0
+            THEN
+               send_mail_po_line;
+            END IF;
+
+            IF v_mo > 0
+            THEN
+               send_mail_mo;
+            END IF;
+         ELSE
+            logf ('Kirim email status Phase Out');
+            send_mail_ed (v_cnt_ed, v_result_ed);
+         END IF;
+
+         logf ('Update Phase Out sukses');
+      END IF;
+
+      IF v_cnt_3m > 0
+      THEN
+         logf ('Kirim email status M-3');
+         send_mail_m3 (v_cnt_3m, v_result_3m);
+      END IF;
+   --      IF error_bro
+   --      THEN
+   --         UPDATE xxshp_mpn_halal_exp_temp
+   --            SET update_status = 'E'
+   --          WHERE type_email = 'Phase Out';
+   --
+   --         logf ('status error');
+   --      ELSE
+   --         COMMIT;
+   --         logf ('succesfully inserting ,COMMIT');
+   --      END IF;
+   END check_mpn_halal_exp;
+
+   PROCEDURE send_mail_ed (p_total IN NUMBER, p_result OUT VARCHAR2)
+   IS
+      --      p_to                       varchar2 (2000) := 'Evi.Rachmaniatun@kalbenutritionals.com,Debby.Ardi@kalbenutritionals.com,ardianto.ardi@kalbenutritionals.com';--
+      p_to                       VARCHAR2 (2000) := 'ardianto.ardi@kalbenutritionals.com';
+      p_cc                       VARCHAR2 (2000); -- := 'ardianto.ardi@kalbenutritionals.com';--'reza.fajrin@kalbenutritionals.com';
+      p_bcc                      VARCHAR2 (2000) := 'ardianto.ardi@kalbenutritionals.com'; --'adhi.rizaldi@kalbenutritionals.com';--,
+      lv_smtp_server             VARCHAR2 (100)
+                                    := fnd_profile.VALUE ('XXSHP_SMTP_CONN'); --'10.171.8.88';
+      lv_domain                  VARCHAR2 (100);
+      lv_from                    VARCHAR2 (100)
+                                    := fnd_profile.VALUE ('XXSHP_EMAIL_FROM'); --'oracle@kalbenutritionals.com';
+      v_connection               UTL_SMTP.connection;
+      c_mime_boundary   CONSTANT VARCHAR2 (256) := '--AAAAA000956--';
+      v_clob                     CLOB;
+      ln_cnt                     NUMBER;
+      ld_date                    DATE;
+      v_filename                 VARCHAR2 (100);
+   BEGIN
+      mo_global.set_policy_context ('S', g_organization_id);
+
+      logf ('Request ID : ' || fnd_global.conc_request_id);
+
+      ld_date := SYSDATE;
+      lv_domain := lv_smtp_server;
+
+      BEGIN
+         v_connection := UTL_SMTP.open_connection (lv_smtp_server, 25); --To open the connection
+         UTL_SMTP.helo (v_connection, lv_smtp_server);
+         UTL_SMTP.mail (v_connection, lv_from);
+         process_recipients (v_connection, p_to);
+         process_recipients (v_connection, p_cc);
+         process_recipients (v_connection, p_bcc);
+         UTL_SMTP.open_data (v_connection);
+         UTL_SMTP.write_data (
+            v_connection,
+               'Date: '
+            || TO_CHAR (SYSDATE, 'Dy, DD Mon YYYY hh24:mi:ss')
+            || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              'From: ' || lv_from || UTL_TCP.crlf);
+
+         IF TRIM (p_to) IS NOT NULL
+         THEN
+            UTL_SMTP.write_data (v_connection,
+                                 'To: ' || p_to || UTL_TCP.crlf);
+         END IF;
+
+         IF TRIM (p_cc) IS NOT NULL
+         THEN
+            UTL_SMTP.write_data (v_connection,
+                                 'Cc: ' || p_cc || UTL_TCP.crlf);
+         END IF;
+
+         IF TRIM (p_bcc) IS NOT NULL
+         THEN
+            UTL_SMTP.write_data (v_connection,
+                                 'Bcc: ' || p_bcc || UTL_TCP.crlf);
+         END IF;
+
+         UTL_SMTP.write_data (
+            v_connection,
+            'Subject: Notifikasi Halal Expiry Date' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              'MIME-Version: 1.0' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (
+            v_connection,
+               'Content-Type: multipart/mixed; boundary="'
+            || c_mime_boundary
+            || '"'
+            || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+         UTL_SMTP.write_data (
+            v_connection,
+            'This is a multi-part message in MIME format.' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              '--' || c_mime_boundary || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              'Content-Type: text/plain' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (
+            v_connection,
+            'Content-Transfer_Encoding: 7bit' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection, '' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection, 'Dear All,' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (
+            v_connection,
+               UTL_TCP.crlf
+            || 'Please be aware that attached Material Halal Certificate is expired. '
+            || CHR (13)
+            || CHR (10)
+            || 'These item status has been changed to PHASE OUT.'
+            || CHR (13)
+            || CHR (10)
+            || 'All PR (Purchase Requisition), PO (Purchase Order), BO (Batch Order) using these items can not be created when the item status is in phase out.'
+            || UTL_TCP.crlf);
+         UTL_SMTP.write_data (
+            v_connection,
+               UTL_TCP.crlf
+            || 'Please renew the Halal Expiry Date to change the status back to ACTIVE.'
+            || UTL_TCP.crlf);
+         UTL_SMTP.write_data (
+            v_connection,
+               UTL_TCP.crlf
+            || 'NOTE - Please do not reply since this is an automatically generated e-mail.'
+            || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              'Total Data ' || p_total || UTL_TCP.crlf);
+
+         v_filename :=
+            'SHP__Halal_Phase_Out_' || TO_CHAR (SYSDATE, 'DDMMRRRR');
+
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              '--' || c_mime_boundary || UTL_TCP.crlf);
+         ln_cnt := 1;
+
+         --/*Condition to check for the creation of csv attachment
+         IF (ln_cnt <> 0)
+         THEN
+            UTL_SMTP.write_data (
+               v_connection,
+                  'Content-Disposition: attachment; filename="'
+               || v_filename
+               || '.csv'
+               || '"'
+               || UTL_TCP.crlf);
+         END IF;
+
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+
+         v_clob :=
+               'Category,Item Code,Item Desc,Organization,Supplier Name,Part,Sertificate Halal Number,Expiry Date,Phase Out,Type Email,Item Template, Halal Body, Manufacturer Name'
+            || UTL_TCP.crlf;
+
+         UTL_SMTP.write_data (v_connection, v_clob);
+
+         FOR i IN mail_ed_cur
+         LOOP
+            BEGIN
+               v_clob :=
+                     i.kn
+                  || ','
+                  || i.item_code
+                  || ','
+                  || REPLACE (i.item_desc, ',')
+                  || ','
+                  || i.organization_code
+                  || ','
+                  || REPLACE (i.supplier_name, ',')
+                  || ','
+                  || i.part
+                  || ','
+                  || '='
+                  || '"'
+                  || i.sertf_halal_number
+                  || '"'
+                  || ','
+                  || i.halal_expiry_date
+                  || ','
+                  || i.phase_out
+                  || ','
+                  || i.type_email
+                  || ','
+                  || i.item_template
+                  || ','
+                  || i.halal_body
+                  || ','
+                  || i.manufacturer_name
+                  || UTL_TCP.crlf;
+            EXCEPTION
+               WHEN OTHERS
+               THEN
+                  logf (SQLERRM);
+                  logf (DBMS_UTILITY.format_error_backtrace);
+            END;
+
+            --Writing data in csv attachment.
+            UTL_SMTP.write_data (v_connection, v_clob);
+         END LOOP;
+
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+         UTL_SMTP.close_data (v_connection);
+         UTL_SMTP.quit (v_connection);
+
+         p_result := 'Success. Email Sent To ' || p_to;
+         logf (p_result);
+      EXCEPTION
+         WHEN OTHERS
+         THEN
+            logf ('Error ' || SQLERRM);
+            logf (DBMS_UTILITY.format_error_backtrace);
+      END;
+   END send_mail_ed;
+
+   PROCEDURE send_mail_m3 (p_total IN NUMBER, p_result OUT VARCHAR2)
+   IS
+      --      p_to                       varchar2 (2000) := 'Evi.Rachmaniatun@kalbenutritionals.com,Debby.Ardi@kalbenutritionals.com,ardianto.ardi@kalbenutritionals.com';--
+      p_to                       VARCHAR2 (2000) := 'ardianto.ardi@kalbenutritionals.com';
+      p_cc                       VARCHAR2 (2000); -- := 'ardianto.ardi@kalbenutritionals.com';--'reza.fajrin@kalbenutritionals.com';
+      p_bcc                      VARCHAR2 (2000) := 'ardianto.ardi@kalbenutritionals.com'; --'adhi.rizaldi@kalbenutritionals.com';--,
+      lv_smtp_server             VARCHAR2 (100)
+                                    := fnd_profile.VALUE ('XXSHP_SMTP_CONN'); --'10.171.8.88';
+      lv_domain                  VARCHAR2 (100);
+      lv_from                    VARCHAR2 (100)
+                                    := fnd_profile.VALUE ('XXSHP_EMAIL_FROM'); --'oracle@kalbenutritionals.com';
+      v_connection               UTL_SMTP.connection;
+      c_mime_boundary   CONSTANT VARCHAR2 (256) := '--AAAAA000956--';
+      v_clob                     CLOB;
+      ln_cnt                     NUMBER;
+      ld_date                    DATE;
+      v_filename                 VARCHAR2 (100);
+   BEGIN
+      mo_global.set_policy_context ('S', g_organization_id);
+
+      logf ('request ID : ' || fnd_global.conc_request_id);
+
+      ld_date := SYSDATE;
+      lv_domain := lv_smtp_server;
+
+      BEGIN
+         v_connection := UTL_SMTP.open_connection (lv_smtp_server, 25); --To open the connection
+         UTL_SMTP.helo (v_connection, lv_smtp_server);
+         UTL_SMTP.mail (v_connection, lv_from);
+         process_recipients (v_connection, p_to);
+         process_recipients (v_connection, p_cc);
+         process_recipients (v_connection, p_bcc);
+         UTL_SMTP.open_data (v_connection);
+         UTL_SMTP.write_data (
+            v_connection,
+               'Date: '
+            || TO_CHAR (SYSDATE, 'Dy, DD Mon YYYY hh24:mi:ss')
+            || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              'From: ' || lv_from || UTL_TCP.crlf);
+
+         IF TRIM (p_to) IS NOT NULL
+         THEN
+            UTL_SMTP.write_data (v_connection,
+                                 'To: ' || p_to || UTL_TCP.crlf);
+         END IF;
+
+         IF TRIM (p_cc) IS NOT NULL
+         THEN
+            UTL_SMTP.write_data (v_connection,
+                                 'Cc: ' || p_cc || UTL_TCP.crlf);
+         END IF;
+
+         IF TRIM (p_bcc) IS NOT NULL
+         THEN
+            UTL_SMTP.write_data (v_connection,
+                                 'Bcc: ' || p_bcc || UTL_TCP.crlf);
+         END IF;
+
+         UTL_SMTP.write_data (
+            v_connection,
+            'Subject: Notifikasi Halal Expiry M-3' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              'MIME-Version: 1.0' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (
+            v_connection,
+               'Content-Type: multipart/mixed; boundary="'
+            || c_mime_boundary
+            || '"'
+            || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+         UTL_SMTP.write_data (
+            v_connection,
+            'This is a multi-part message in MIME format.' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              '--' || c_mime_boundary || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              'Content-Type: text/plain' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (
+            v_connection,
+            'Content-Transfer_Encoding: 7bit' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection, '' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection, 'Dear All,' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (
+            v_connection,
+               UTL_TCP.crlf
+            || 'Please be aware that attached Material Halal Expiry Date would shortly expired within 3 months.'
+            || CHR (13)
+            || CHR (10)
+            || 'Please renew the Halal Expiry Date to avoid item status changes to phase out.'
+            || CHR (13)
+            || CHR (10)
+            || 'All PR (Purchase Requisition), PO (Purchase Order), BO (Batch Order) using these items can not be created when the item status is in phase out.'
+            || UTL_TCP.crlf);
+         UTL_SMTP.write_data (
+            v_connection,
+               UTL_TCP.crlf
+            || 'NOTE - Please do not reply since this is an automatically generated e-mail.'
+            || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              'Total Data ' || p_total || UTL_TCP.crlf);
+
+         v_filename := 'SHP__halal_3M_' || TO_CHAR (SYSDATE, 'DDMMRRRR');
+
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              '--' || c_mime_boundary || UTL_TCP.crlf);
+         ln_cnt := 1;
+
+         --/*Condition to check for the creation of csv attachment
+         IF (ln_cnt <> 0)
+         THEN
+            UTL_SMTP.write_data (
+               v_connection,
+                  'Content-Disposition: attachment; filename="'
+               || v_filename
+               || '.csv'
+               || '"'
+               || UTL_TCP.crlf);
+         END IF;
+
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+
+         v_clob :=
+               'Category,Item Code,Item Desc,Organization,Supplier Name,Part,Sertificate Halal Number,Expiry Date,Phase Out,Type Email,Item Template, Halal Body, Manufacturer Name'
+            || UTL_TCP.crlf;
+
+         UTL_SMTP.write_data (v_connection, v_clob);
+
+         FOR i IN mail_3m_cur
+         LOOP
+            BEGIN
+               v_clob :=
+                     i.kn
+                  || ','
+                  || i.item_code
+                  || ','
+                  || REPLACE (i.item_desc, ',')
+                  || ','
+                  || i.organization_code
+                  || ','
+                  || REPLACE (i.supplier_name, ',')
+                  || ','
+                  || i.part
+                  || ','
+                  || '='
+                  || '"'
+                  || i.sertf_halal_number
+                  || '"'
+                  || ','
+                  || i.halal_expiry_date
+                  || ','
+                  || i.phase_out
+                  || ','
+                  || i.type_email
+                  || ','
+                  || i.item_template
+                  || ','
+                  || i.halal_body
+                  || ','
+                  || i.manufacturer_name
+                  || UTL_TCP.crlf;
+            EXCEPTION
+               WHEN OTHERS
+               THEN
+                  logf (SQLERRM);
+                  logf (DBMS_UTILITY.format_error_backtrace);
+            END;
+
+            --Writing data in csv attachment.
+            UTL_SMTP.write_data (v_connection, v_clob);
+         END LOOP;
+
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+         UTL_SMTP.close_data (v_connection);
+         UTL_SMTP.quit (v_connection);
+
+         p_result := 'Success. Email Sent To ' || p_to;
+         logf (p_result);
+      EXCEPTION
+         WHEN OTHERS
+         THEN
+            logf ('Error : ' || SQLERRM);
+            logf (DBMS_UTILITY.format_error_backtrace);
+      END;
+   END send_mail_m3;
+
+   PROCEDURE send_mail_onhand
+   IS
+      --      p_to                       varchar2 (2000) := 'Evi.Rachmaniatun@kalbenutritionals.com,Debby.Ardi@kalbenutritionals.com,ardianto.ardi@kalbenutritionals.com';--
+      p_to                       VARCHAR2 (2000) := 'ardianto.ardi@kalbenutritionals.com';
+      p_cc                       VARCHAR2 (2000); -- := 'ardianto.ardi@kalbenutritionals.com';--'reza.fajrin@kalbenutritionals.com';
+      p_bcc                      VARCHAR2 (2000) := 'ardianto.ardi@kalbenutritionals.com'; --'adhi.rizaldi@kalbenutritionals.com';--,
+      lv_smtp_server             VARCHAR2 (100)
+                                    := fnd_profile.VALUE ('XXSHP_SMTP_CONN'); --'10.171.8.88';
+      lv_domain                  VARCHAR2 (100);
+      lv_from                    VARCHAR2 (100)
+                                    := fnd_profile.VALUE ('XXSHP_EMAIL_FROM'); --'oracle@kalbenutritionals.com';
+      v_connection               UTL_SMTP.connection;
+      c_mime_boundary   CONSTANT VARCHAR2 (256) := '--AAAAA000956--';
+      v_clob                     CLOB;
+      ln_cnt                     NUMBER;
+      ld_date                    DATE;
+      v_filename                 VARCHAR2 (100);
+
+      CURSOR item_onhand_cur
+      IS
+           SELECT organization_code,
+                  item_description,
+                  msi.segment1 item_code,
+                  SUM (transaction_quantity) quantity,
+                  msi.attribute2
+             FROM mtl_onhand_quantities_detail moq,
+                  mtl_system_items msi,
+                  mtl_mfg_part_numbers_all_v mpn,
+                  mtl_parameters mp
+            WHERE     1 = 1
+                  AND moq.inventory_item_id = msi.inventory_item_id
+                  AND mpn.inventory_item_id = msi.inventory_item_id
+                  AND mp.organization_id = moq.organization_id
+                  --AND moq.inventory_item_id = p_inventory_item_id
+                  AND TRIM (msi.attribute2) IN ('PM', 'FGSA BUY', 'FGSA MAKE')
+         GROUP BY organization_code,
+                  item_description,
+                  msi.segment1,
+                  msi.attribute2;
+   BEGIN
+      mo_global.set_policy_context ('S', g_organization_id);
+
+      logf ('Request ID : ' || fnd_global.conc_request_id);
+
+      ld_date := SYSDATE;
+      lv_domain := lv_smtp_server;
+
+      BEGIN
+         v_connection := UTL_SMTP.open_connection (lv_smtp_server, 25); --To open the connection
+         UTL_SMTP.helo (v_connection, lv_smtp_server);
+         UTL_SMTP.mail (v_connection, lv_from);
+         process_recipients (v_connection, p_to);
+         process_recipients (v_connection, p_cc);
+         process_recipients (v_connection, p_bcc);
+         UTL_SMTP.open_data (v_connection);
+         UTL_SMTP.write_data (
+            v_connection,
+               'Date: '
+            || TO_CHAR (SYSDATE, 'Dy, DD Mon YYYY hh24:mi:ss')
+            || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              'From: ' || lv_from || UTL_TCP.crlf);
+
+         IF TRIM (p_to) IS NOT NULL
+         THEN
+            UTL_SMTP.write_data (v_connection,
+                                 'To: ' || p_to || UTL_TCP.crlf);
+         END IF;
+
+         IF TRIM (p_cc) IS NOT NULL
+         THEN
+            UTL_SMTP.write_data (v_connection,
+                                 'Cc: ' || p_cc || UTL_TCP.crlf);
+         END IF;
+
+         IF TRIM (p_bcc) IS NOT NULL
+         THEN
+            UTL_SMTP.write_data (v_connection,
+                                 'Bcc: ' || p_bcc || UTL_TCP.crlf);
+         END IF;
+
+         UTL_SMTP.write_data (
+            v_connection,
+            'Subject: Notifikasi Halal Expiry Date' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              'MIME-Version: 1.0' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (
+            v_connection,
+               'Content-Type: multipart/mixed; boundary="'
+            || c_mime_boundary
+            || '"'
+            || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+         UTL_SMTP.write_data (
+            v_connection,
+            'This is a multi-part message in MIME format.' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              '--' || c_mime_boundary || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              'Content-Type: text/plain' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (
+            v_connection,
+            'Content-Transfer_Encoding: 7bit' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection, '' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection, 'Dear All,' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (
+            v_connection,
+               UTL_TCP.crlf
+            || 'NOTE - Please do not reply since this is an automatically generated e-mail.'
+            || UTL_TCP.crlf);
+
+         v_filename :=
+            'SHP__Halal_Item_have_onhand_' || TO_CHAR (SYSDATE, 'DDMMRRRR');
+
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              '--' || c_mime_boundary || UTL_TCP.crlf);
+         ln_cnt := 1;
+
+         --/*Condition to check for the creation of csv attachment
+         IF (ln_cnt <> 0)
+         THEN
+            UTL_SMTP.write_data (
+               v_connection,
+                  'Content-Disposition: attachment; filename="'
+               || v_filename
+               || '.csv'
+               || '"'
+               || UTL_TCP.crlf);
+         END IF;
+
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+
+         v_clob := 'Organization,Item Code,Item Desc,Quantity' || UTL_TCP.crlf;
+
+         UTL_SMTP.write_data (v_connection, v_clob);
+
+         FOR i IN mail_ed_cur
+         LOOP
+            BEGIN
+               v_clob :=
+                     i.organization_code
+                  || ','
+                  || i.item_code
+                  || ','
+                  || i.item_description
+                  || ','
+                  || i.quantity
+                  || ','
+                  || i.attribute2
+                  || UTL_TCP.crlf;
+            EXCEPTION
+               WHEN OTHERS
+               THEN
+                  logf (SQLERRM);
+                  logf (DBMS_UTILITY.format_error_backtrace);
+            END;
+
+            --Writing data in csv attachment.
+            UTL_SMTP.write_data (v_connection, v_clob);
+         END LOOP;
+
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+         UTL_SMTP.close_data (v_connection);
+         UTL_SMTP.quit (v_connection);
+
+         p_result := 'Success. Email Sent To ' || p_to;
+         logf (p_result);
+      EXCEPTION
+         WHEN OTHERS
+         THEN
+            logf ('Error ' || SQLERRM);
+            logf (DBMS_UTILITY.format_error_backtrace);
+      END;
+   END send_mail_onhand;
+   
+   PROCEDURE send_mail_po_line
+   IS
+      --      p_to                       varchar2 (2000) := 'Evi.Rachmaniatun@kalbenutritionals.com,Debby.Ardi@kalbenutritionals.com,ardianto.ardi@kalbenutritionals.com';--
+      p_to                       VARCHAR2 (2000) := 'ardianto.ardi@kalbenutritionals.com';
+      p_cc                       VARCHAR2 (2000); -- := 'ardianto.ardi@kalbenutritionals.com';--'reza.fajrin@kalbenutritionals.com';
+      p_bcc                      VARCHAR2 (2000) := 'ardianto.ardi@kalbenutritionals.com'; --'adhi.rizaldi@kalbenutritionals.com';--,
+      lv_smtp_server             VARCHAR2 (100)
+                                    := fnd_profile.VALUE ('XXSHP_SMTP_CONN'); --'10.171.8.88';
+      lv_domain                  VARCHAR2 (100);
+      lv_from                    VARCHAR2 (100)
+                                    := fnd_profile.VALUE ('XXSHP_EMAIL_FROM'); --'oracle@kalbenutritionals.com';
+      v_connection               UTL_SMTP.connection;
+      c_mime_boundary   CONSTANT VARCHAR2 (256) := '--AAAAA000956--';
+      v_clob                     CLOB;
+      ln_cnt                     NUMBER;
+      ld_date                    DATE;
+      v_filename                 VARCHAR2 (100);
+
+      CURSOR item_onhand_cur
+      IS
+           SELECT organization_code,
+                  item_description,
+                  msi.segment1 item_code,
+                  SUM (transaction_quantity) quantity,
+                  msi.attribute2
+             FROM mtl_onhand_quantities_detail moq,
+                  mtl_system_items msi,
+                  mtl_mfg_part_numbers_all_v mpn,
+                  mtl_parameters mp
+            WHERE     1 = 1
+                  AND moq.inventory_item_id = msi.inventory_item_id
+                  AND mpn.inventory_item_id = msi.inventory_item_id
+                  AND mp.organization_id = moq.organization_id
+                  --AND moq.inventory_item_id = p_inventory_item_id
+                  AND TRIM (msi.attribute2) IN ('PM', 'FGSA BUY', 'FGSA MAKE')
+         GROUP BY organization_code,
+                  item_description,
+                  msi.segment1,
+                  msi.attribute2;
+   BEGIN
+      mo_global.set_policy_context ('S', g_organization_id);
+
+      logf ('Request ID : ' || fnd_global.conc_request_id);
+
+      ld_date := SYSDATE;
+      lv_domain := lv_smtp_server;
+
+      BEGIN
+         v_connection := UTL_SMTP.open_connection (lv_smtp_server, 25); --To open the connection
+         UTL_SMTP.helo (v_connection, lv_smtp_server);
+         UTL_SMTP.mail (v_connection, lv_from);
+         process_recipients (v_connection, p_to);
+         process_recipients (v_connection, p_cc);
+         process_recipients (v_connection, p_bcc);
+         UTL_SMTP.open_data (v_connection);
+         UTL_SMTP.write_data (
+            v_connection,
+               'Date: '
+            || TO_CHAR (SYSDATE, 'Dy, DD Mon YYYY hh24:mi:ss')
+            || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              'From: ' || lv_from || UTL_TCP.crlf);
+
+         IF TRIM (p_to) IS NOT NULL
+         THEN
+            UTL_SMTP.write_data (v_connection,
+                                 'To: ' || p_to || UTL_TCP.crlf);
+         END IF;
+
+         IF TRIM (p_cc) IS NOT NULL
+         THEN
+            UTL_SMTP.write_data (v_connection,
+                                 'Cc: ' || p_cc || UTL_TCP.crlf);
+         END IF;
+
+         IF TRIM (p_bcc) IS NOT NULL
+         THEN
+            UTL_SMTP.write_data (v_connection,
+                                 'Bcc: ' || p_bcc || UTL_TCP.crlf);
+         END IF;
+
+         UTL_SMTP.write_data (
+            v_connection,
+            'Subject: Notifikasi Error Halal Expiry Date' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              'MIME-Version: 1.0' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (
+            v_connection,
+               'Content-Type: multipart/mixed; boundary="'
+            || c_mime_boundary
+            || '"'
+            || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+         UTL_SMTP.write_data (
+            v_connection,
+            'This is a multi-part message in MIME format.' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              '--' || c_mime_boundary || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              'Content-Type: text/plain' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (
+            v_connection,
+            'Content-Transfer_Encoding: 7bit' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection, '' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection, 'Dear All,' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (
+            v_connection,
+               UTL_TCP.crlf
+            || 'NOTE - Please do not reply since this is an automatically generated e-mail.'
+            || UTL_TCP.crlf);
+
+         v_filename :=
+            'SHP__Halal_Item_have_po_line_' || TO_CHAR (SYSDATE, 'DDMMRRRR');
+
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              '--' || c_mime_boundary || UTL_TCP.crlf);
+         ln_cnt := 1;
+
+         --/*Condition to check for the creation of csv attachment
+         IF (ln_cnt <> 0)
+         THEN
+            UTL_SMTP.write_data (
+               v_connection,
+                  'Content-Disposition: attachment; filename="'
+               || v_filename
+               || '.csv'
+               || '"'
+               || UTL_TCP.crlf);
+         END IF;
+
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+
+         v_clob := 'Organization,Item Code,Item Desc,Quantity' || UTL_TCP.crlf;
+
+         UTL_SMTP.write_data (v_connection, v_clob);
+
+         FOR i IN mail_ed_cur
+         LOOP
+            BEGIN
+               v_clob :=
+                     i.organization_code
+                  || ','
+                  || i.item_code
+                  || ','
+                  || i.item_description
+                  || ','
+                  || i.quantity
+                  || ','
+                  || i.attribute2
+                  || UTL_TCP.crlf;
+            EXCEPTION
+               WHEN OTHERS
+               THEN
+                  logf (SQLERRM);
+                  logf (DBMS_UTILITY.format_error_backtrace);
+            END;
+
+            --Writing data in csv attachment.
+            UTL_SMTP.write_data (v_connection, v_clob);
+         END LOOP;
+
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+         UTL_SMTP.close_data (v_connection);
+         UTL_SMTP.quit (v_connection);
+
+         p_result := 'Success. Email Sent To ' || p_to;
+         logf (p_result);
+      EXCEPTION
+         WHEN OTHERS
+         THEN
+            logf ('Error ' || SQLERRM);
+            logf (DBMS_UTILITY.format_error_backtrace);
+      END;
+   END send_mail_po_line;
+   
+   PROCEDURE send_mail_mo
+   IS
+      --      p_to                       varchar2 (2000) := 'Evi.Rachmaniatun@kalbenutritionals.com,Debby.Ardi@kalbenutritionals.com,ardianto.ardi@kalbenutritionals.com';--
+      p_to                       VARCHAR2 (2000) := 'ardianto.ardi@kalbenutritionals.com';
+      p_cc                       VARCHAR2 (2000); -- := 'ardianto.ardi@kalbenutritionals.com';--'reza.fajrin@kalbenutritionals.com';
+      p_bcc                      VARCHAR2 (2000) := 'ardianto.ardi@kalbenutritionals.com'; --'adhi.rizaldi@kalbenutritionals.com';--,
+      lv_smtp_server             VARCHAR2 (100)
+                                    := fnd_profile.VALUE ('XXSHP_SMTP_CONN'); --'10.171.8.88';
+      lv_domain                  VARCHAR2 (100);
+      lv_from                    VARCHAR2 (100)
+                                    := fnd_profile.VALUE ('XXSHP_EMAIL_FROM'); --'oracle@kalbenutritionals.com';
+      v_connection               UTL_SMTP.connection;
+      c_mime_boundary   CONSTANT VARCHAR2 (256) := '--AAAAA000956--';
+      v_clob                     CLOB;
+      ln_cnt                     NUMBER;
+      ld_date                    DATE;
+      v_filename                 VARCHAR2 (100);
+
+      CURSOR item_onhand_cur
+      IS
+           SELECT organization_code,
+                  item_description,
+                  msi.segment1 item_code,
+                  SUM (transaction_quantity) quantity,
+                  msi.attribute2
+             FROM mtl_onhand_quantities_detail moq,
+                  mtl_system_items msi,
+                  mtl_mfg_part_numbers_all_v mpn,
+                  mtl_parameters mp
+            WHERE     1 = 1
+                  AND moq.inventory_item_id = msi.inventory_item_id
+                  AND mpn.inventory_item_id = msi.inventory_item_id
+                  AND mp.organization_id = moq.organization_id
+                  --AND moq.inventory_item_id = p_inventory_item_id
+                  AND TRIM (msi.attribute2) IN ('PM', 'FGSA BUY', 'FGSA MAKE')
+         GROUP BY organization_code,
+                  item_description,
+                  msi.segment1,
+                  msi.attribute2;
+   BEGIN
+      mo_global.set_policy_context ('S', g_organization_id);
+
+      logf ('Request ID : ' || fnd_global.conc_request_id);
+
+      ld_date := SYSDATE;
+      lv_domain := lv_smtp_server;
+
+      BEGIN
+         v_connection := UTL_SMTP.open_connection (lv_smtp_server, 25); --To open the connection
+         UTL_SMTP.helo (v_connection, lv_smtp_server);
+         UTL_SMTP.mail (v_connection, lv_from);
+         process_recipients (v_connection, p_to);
+         process_recipients (v_connection, p_cc);
+         process_recipients (v_connection, p_bcc);
+         UTL_SMTP.open_data (v_connection);
+         UTL_SMTP.write_data (
+            v_connection,
+               'Date: '
+            || TO_CHAR (SYSDATE, 'Dy, DD Mon YYYY hh24:mi:ss')
+            || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              'From: ' || lv_from || UTL_TCP.crlf);
+
+         IF TRIM (p_to) IS NOT NULL
+         THEN
+            UTL_SMTP.write_data (v_connection,
+                                 'To: ' || p_to || UTL_TCP.crlf);
+         END IF;
+
+         IF TRIM (p_cc) IS NOT NULL
+         THEN
+            UTL_SMTP.write_data (v_connection,
+                                 'Cc: ' || p_cc || UTL_TCP.crlf);
+         END IF;
+
+         IF TRIM (p_bcc) IS NOT NULL
+         THEN
+            UTL_SMTP.write_data (v_connection,
+                                 'Bcc: ' || p_bcc || UTL_TCP.crlf);
+         END IF;
+
+         UTL_SMTP.write_data (
+            v_connection,
+            'Subject: Notifikasi Halal Expiry Date' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              'MIME-Version: 1.0' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (
+            v_connection,
+               'Content-Type: multipart/mixed; boundary="'
+            || c_mime_boundary
+            || '"'
+            || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+         UTL_SMTP.write_data (
+            v_connection,
+            'This is a multi-part message in MIME format.' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              '--' || c_mime_boundary || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              'Content-Type: text/plain' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (
+            v_connection,
+            'Content-Transfer_Encoding: 7bit' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection, '' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection, 'Dear All,' || UTL_TCP.crlf);
+         UTL_SMTP.write_data (
+            v_connection,
+               UTL_TCP.crlf
+            || 'NOTE - Please do not reply since this is an automatically generated e-mail.'
+            || UTL_TCP.crlf);
+
+         v_filename :=
+            'SHP__Halal_Item_have_mo_' || TO_CHAR (SYSDATE, 'DDMMRRRR');
+
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+         UTL_SMTP.write_data (v_connection,
+                              '--' || c_mime_boundary || UTL_TCP.crlf);
+         ln_cnt := 1;
+
+         --/*Condition to check for the creation of csv attachment
+         IF (ln_cnt <> 0)
+         THEN
+            UTL_SMTP.write_data (
+               v_connection,
+                  'Content-Disposition: attachment; filename="'
+               || v_filename
+               || '.csv'
+               || '"'
+               || UTL_TCP.crlf);
+         END IF;
+
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+
+         v_clob := 'Organization,Item Code,Item Desc,Quantity' || UTL_TCP.crlf;
+
+         UTL_SMTP.write_data (v_connection, v_clob);
+
+         FOR i IN mail_ed_cur
+         LOOP
+            BEGIN
+               v_clob :=
+                     i.organization_code
+                  || ','
+                  || i.item_code
+                  || ','
+                  || i.item_description
+                  || ','
+                  || i.quantity
+                  || ','
+                  || i.attribute2
+                  || UTL_TCP.crlf;
+            EXCEPTION
+               WHEN OTHERS
+               THEN
+                  logf (SQLERRM);
+                  logf (DBMS_UTILITY.format_error_backtrace);
+            END;
+
+            --Writing data in csv attachment.
+            UTL_SMTP.write_data (v_connection, v_clob);
+         END LOOP;
+
+         UTL_SMTP.write_data (v_connection, UTL_TCP.crlf);
+         UTL_SMTP.close_data (v_connection);
+         UTL_SMTP.quit (v_connection);
+
+         p_result := 'Success. Email Sent To ' || p_to;
+         logf (p_result);
+      EXCEPTION
+         WHEN OTHERS
+         THEN
+            logf ('Error ' || SQLERRM);
+            logf (DBMS_UTILITY.format_error_backtrace);
+      END;
+   END send_mail_mo;
+END xxshp_mpn_halal_exp_notify;
+/
