@@ -1,0 +1,91 @@
+DROP VIEW APPS.XXKBN_INVOICE_CLAIM_LINE_V;
+
+CREATE OR REPLACE FORCE VIEW APPS.XXKBN_INVOICE_CLAIM_LINE_V
+(
+   INVOICE_NUM,
+   INVOICE_ID,
+   LINE_NUMBER,
+   LINE_TYPE_LOOKUP_CODE,
+   DESCRIPTION,
+   LINE_SOURCE,
+   ORG_ID,
+   COA,
+   PRORATE_ACROSS_ALL_ITEMS,
+   ACCOUNTING_DATE,
+   PERIOD_NAME,
+   DEFERRED_ACCTG_FLAG,
+   AMOUNT,
+   BASE_AMOUNT,
+   DISCARDED_FLAG,
+   CANCELLED_FLAG,
+   CREATION_DATE,
+   CREATED_BY,
+   LAST_UPDATED_BY,
+   LAST_UPDATE_DATE,
+   LAST_UPDATE_LOGIN,
+   ATTRIBUTE_CATEGORY,
+   ATTRIBUTE1,
+   ATTRIBUTE2,
+   ATTRIBUTE3,
+   ATTRIBUTE5,
+   ATTRIBUTE6,
+   ATTRIBUTE7,
+   ATTRIBUTE8,
+   ATTRIBUTE9,
+   ATTRIBUTE10,
+   ATTRIBUTE11,
+   ATTRIBUTE12,
+   ATTRIBUTE13,
+   ATTRIBUTE14,
+   ATTRIBUTE15,
+   TAX_CLASSIFICATION_CODE,
+   PAY_AWT_GROUP_ID
+)
+   BEQUEATH DEFINER
+AS
+   SELECT ai.invoice_num,
+          aila.INVOICE_ID,
+          aila.LINE_NUMBER,
+          aila.LINE_TYPE_LOOKUP_CODE,
+          aila.DESCRIPTION,
+          aila.LINE_SOURCE,
+          aila.ORG_ID,
+          aila.OVERLAY_DIST_CODE_CONCAT COA,
+          aila.PRORATE_ACROSS_ALL_ITEMS,
+          aila.ACCOUNTING_DATE,
+          aila.PERIOD_NAME,
+          aila.DEFERRED_ACCTG_FLAG,
+          aila.AMOUNT,
+          aila.BASE_AMOUNT,
+          aila.DISCARDED_FLAG,
+          aila.CANCELLED_FLAG,
+          aila.CREATION_DATE,
+          aila.CREATED_BY,
+          aila.LAST_UPDATED_BY,
+          aila.LAST_UPDATE_DATE,
+          aila.LAST_UPDATE_LOGIN,
+          aila.ATTRIBUTE_CATEGORY,
+          aila.ATTRIBUTE1,
+          aila.ATTRIBUTE2,
+          aila.ATTRIBUTE3,
+          aila.ATTRIBUTE5,
+          aila.ATTRIBUTE6,
+          aila.ATTRIBUTE7,
+          aila.ATTRIBUTE8,
+          aila.ATTRIBUTE9,
+          aila.ATTRIBUTE10,
+          aila.ATTRIBUTE11,
+          aila.ATTRIBUTE12,
+          aila.ATTRIBUTE13,
+          aila.ATTRIBUTE14,
+          aila.ATTRIBUTE15,
+          TAX_CLASSIFICATION_CODE,
+          aila.PAY_AWT_GROUP_ID
+     FROM ap_invoices_all ai, ap_invoice_lines_all aila
+    WHERE 1 = 1 AND ai.invoice_id = aila.invoice_id AND ai.source = 'VISION';
+
+
+CREATE OR REPLACE SYNONYM XXKBN.XXKBN_INVOICE_CLAIM_LINE_V FOR APPS.XXKBN_INVOICE_CLAIM_LINE_V;
+
+
+GRANT SELECT ON APPS.XXKBN_INVOICE_CLAIM_LINE_V TO XXKBN;
